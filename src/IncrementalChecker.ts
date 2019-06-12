@@ -303,22 +303,43 @@ export class IncrementalChecker implements IncrementalCheckerInterface {
       this.workDivision
     );
 
+    const tsConfig = IncrementalChecker.loadProgramConfig(
+      this.typescript,
+      this.programConfigFile,
+      this.compilerOptions
+    );
+
     // check given work set
     workSet.forEach(sourceFile => {
       if (cancellationToken) {
         cancellationToken.throwIfCancellationRequested();
       }
 
-      const diagnosticsToRegister: ReadonlyArray<ts.Diagnostic> = this
-        .checkSyntacticErrors
-        ? program
+      if (tsConfig.options.declaration) {
+        diagnostics.push(...ts.getPreEmitDiagnostics(program));
+
+        const diagnosticsToRegister: ReadonlyArray<ts.Diagnostic> = this
+          .checkSyntacticErrors
+          ? program
+            .emit(sourceFile, undefined, cancellationToken, true).diagnostics
+            .concat(
+              program.getSyntacticDiagnostics(sourceFile, cancellationToken)
+            )
+          : program.emit(sourceFile, undefined, cancellationToken, true).diagnostics;
+
+        diagnostics.push(...diagnosticsToRegister);
+      } else {
+        const diagnosticsToRegister: ReadonlyArray<ts.Diagnostic> = this
+          .checkSyntacticErrors
+          ? program
             .getSemanticDiagnostics(sourceFile, cancellationToken)
             .concat(
               program.getSyntacticDiagnostics(sourceFile, cancellationToken)
             )
-        : program.getSemanticDiagnostics(sourceFile, cancellationToken);
+          : program.getSemanticDiagnostics(sourceFile, cancellationToken);
 
-      diagnostics.push(...diagnosticsToRegister);
+        diagnostics.push(...diagnosticsToRegister);
+      }
     });
 
     // normalize and deduplicate diagnostics
