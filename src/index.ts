@@ -14,7 +14,7 @@ import { CancellationToken } from './CancellationToken';
 import { NormalizedMessage } from './NormalizedMessage';
 import { createDefaultFormatter } from './formatter/defaultFormatter';
 import { createCodeframeFormatter } from './formatter/codeframeFormatter';
-import { FsHelper } from './FsHelper';
+import { fileExistsSync } from './FsHelper';
 import { Message } from './Message';
 
 import {
@@ -23,6 +23,7 @@ import {
   ForkTsCheckerHooks
 } from './hooks';
 import { RunPayload, RunResult, RUN } from './RpcTypes';
+import { VueOptions } from './types/vue-options';
 
 const checkerPluginName = 'fork-ts-checker-webpack-plugin';
 
@@ -42,8 +43,11 @@ namespace ForkTsCheckerWebpackPlugin {
     typescript: string;
     tsconfig: string;
     compilerOptions: object;
-    tslint: string | true;
+    tslint: string | true | undefined;
     tslintAutoFix: boolean;
+    eslint: boolean;
+    /** Options to supply to eslint https://eslint.org/docs/1.0.0/developer-guide/nodejs-api#cliengine */
+    eslintOptions: object;
     watch: string | string[];
     async: boolean;
     ignoreDiagnostics: number[];
@@ -58,7 +62,7 @@ namespace ForkTsCheckerWebpackPlugin {
     checkSyntacticErrors: boolean;
     memoryLimit: number;
     workers: number;
-    vue: boolean;
+    vue: boolean | Partial<VueOptions>;
     useTypescriptIncrementalApi: boolean;
     measureCompilationTime: boolean;
     resolveModuleNameModule: string;
@@ -95,8 +99,10 @@ class ForkTsCheckerWebpackPlugin {
   public readonly options: Partial<ForkTsCheckerWebpackPlugin.Options>;
   private tsconfig: string;
   private compilerOptions: object;
-  private tslint?: string | true;
-  private tslintAutoFix: boolean;
+  private tslint: string | boolean | undefined = false;
+  private eslint: boolean = false;
+  private eslintOptions: object = {};
+  private tslintAutoFix: boolean = false;
   private watch: string[];
   private ignoreDiagnostics: number[];
   private ignoreLints: string[];
@@ -115,32 +121,33 @@ class ForkTsCheckerWebpackPlugin {
   private resolveModuleNameModule: string | undefined;
   private resolveTypeReferenceDirectiveModule: string | undefined;
 
-  private tsconfigPath?: string;
-  private tslintPath?: string;
-  private watchPaths: string[];
+  private tsconfigPath: string | undefined = undefined;
+  private tslintPath: string | undefined = undefined;
+  private watchPaths: string[] = [];
 
-  private compiler: any;
-  private started?: [number, number];
-  private elapsed?: [number, number];
-  private cancellationToken?: CancellationToken;
+  private compiler: any = undefined;
+  private started: [number, number] | undefined = undefined;
+  private elapsed: [number, number] | undefined = undefined;
+  private cancellationToken: CancellationToken | undefined = undefined;
 
-  private isWatching: boolean;
-  private checkDone: boolean;
-  private compilationDone: boolean;
-  private diagnostics: NormalizedMessage[];
-  private lints: NormalizedMessage[];
+  private isWatching: boolean = false;
+  private checkDone: boolean = false;
+  private compilationDone: boolean = false;
+  private diagnostics: NormalizedMessage[] = [];
+  private lints: NormalizedMessage[] = [];
 
   private emitCallback: () => void;
   private doneCallback: () => void;
   private typescriptPath: string;
   private typescript: typeof ts;
   private typescriptVersion: string;
-  private tslintVersion: string;
+  private tslintVersion: string | undefined;
+  private eslintVersion: string | undefined = undefined;
 
   private service?: childProcess.ChildProcess;
   protected serviceRpc?: RpcProvider;
 
-  private vue: boolean;
+  private vue: VueOptions;
 
   private measureTime: boolean;
   private performance: any;
@@ -152,17 +159,6 @@ class ForkTsCheckerWebpackPlugin {
     options = options || ({} as ForkTsCheckerWebpackPlugin.Options);
     this.options = { ...options };
 
-    this.tsconfig = options.tsconfig || './tsconfig.json';
-    this.compilerOptions =
-      typeof options.compilerOptions === 'object'
-        ? options.compilerOptions
-        : {};
-    this.tslint = options.tslint
-      ? options.tslint === true
-        ? true
-        : options.tslint
-      : undefined;
-    this.tslintAutoFix = options.tslintAutoFix || false;
     this.watch =
       typeof options.watch === 'string' ? [options.watch] : options.watch || [];
     this.ignoreDiagnostics = options.ignoreDiagnostics || [];
@@ -189,51 +185,43 @@ class ForkTsCheckerWebpackPlugin {
             options.formatterOptions || {}
           );
 
-    this.tsconfigPath = undefined;
-    this.tslintPath = undefined;
-    this.watchPaths = [];
-    this.compiler = undefined;
-
-    this.started = undefined;
-    this.elapsed = undefined;
-    this.cancellationToken = undefined;
-
-    this.isWatching = false;
-    this.checkDone = false;
-    this.compilationDone = false;
-    this.diagnostics = [];
-    this.lints = [];
-
     this.emitCallback = this.createNoopEmitCallback();
     this.doneCallback = this.createDoneCallback();
 
-    this.typescriptPath = options.typescript || require.resolve('typescript');
-    try {
-      this.typescript = require(this.typescriptPath);
-      this.typescriptVersion = this.typescript.version;
-    } catch (_ignored) {
-      throw new Error(
-        'When you use this plugin you must install `typescript`.'
+    const {
+      typescript,
+      typescriptPath,
+      typescriptVersion,
+      tsconfig,
+      compilerOptions
+    } = this.validateTypeScript(options);
+    this.typescript = typescript;
+    this.typescriptPath = typescriptPath;
+    this.typescriptVersion = typescriptVersion;
+    this.tsconfig = tsconfig;
+    this.compilerOptions = compilerOptions;
+
+    if (options.eslint === true) {
+      const { eslintVersion, eslintOptions } = this.validateEslint(options);
+
+      this.eslint = true;
+      this.eslintVersion = eslintVersion;
+      this.eslintOptions = eslintOptions;
+    } else {
+      const { tslint, tslintVersion, tslintAutoFix } = this.validateTslint(
+        options
       );
-    }
-    try {
-      this.tslintVersion = this.tslint
-        ? // tslint:disable-next-line:no-implicit-dependencies
-          require('tslint').Linter.VERSION
-        : undefined;
-    } catch (_ignored) {
-      throw new Error(
-        'When you use `tslint` option, make sure to install `tslint`.'
-      );
+
+      this.tslint = tslint;
+      this.tslintVersion = tslintVersion;
+      this.tslintAutoFix = tslintAutoFix;
     }
 
-    this.validateVersions();
-
-    this.vue = options.vue === true; // default false
+    this.vue = ForkTsCheckerWebpackPlugin.prepareVueOptions(options.vue);
 
     this.useTypescriptIncrementalApi =
       options.useTypescriptIncrementalApi === undefined
-        ? semver.gte(this.typescriptVersion, '3.0.0') && !this.vue
+        ? semver.gte(this.typescriptVersion, '3.0.0') && !this.vue.enabled
         : options.useTypescriptIncrementalApi;
 
     this.measureTime = options.measureCompilationTime === true;
@@ -243,19 +231,101 @@ class ForkTsCheckerWebpackPlugin {
     }
   }
 
-  private validateVersions() {
-    if (semver.lt(this.typescriptVersion, '2.1.0')) {
+  private validateTypeScript(
+    options: Partial<ForkTsCheckerWebpackPlugin.Options>
+  ) {
+    const typescriptPath = options.typescript || require.resolve('typescript');
+    const tsconfig = options.tsconfig || './tsconfig.json';
+    const compilerOptions =
+      typeof options.compilerOptions === 'object'
+        ? options.compilerOptions
+        : {};
+
+    let typescript, typescriptVersion;
+
+    try {
+      typescript = require(typescriptPath);
+      typescriptVersion = typescript.version;
+    } catch (_ignored) {
       throw new Error(
-        `Cannot use current typescript version of ${
-          this.typescriptVersion
-        }, the minimum required version is 2.1.0`
+        'When you use this plugin you must install `typescript`.'
       );
-    } else if (this.tslintVersion && semver.lt(this.tslintVersion, '4.0.0')) {
+    }
+
+    if (semver.lt(typescriptVersion, '2.1.0')) {
       throw new Error(
-        `Cannot use current tslint version of ${
-          this.tslintVersion
-        }, the minimum required version is 4.0.0`
+        `Cannot use current typescript version of ${typescriptVersion}, the minimum required version is 2.1.0`
       );
+    }
+
+    return {
+      typescriptPath,
+      typescript,
+      typescriptVersion,
+      tsconfig,
+      compilerOptions
+    };
+  }
+
+  private validateTslint(options: Partial<ForkTsCheckerWebpackPlugin.Options>) {
+    const tslint = options.tslint
+      ? options.tslint === true
+        ? true
+        : options.tslint
+      : undefined;
+    let tslintAutoFix, tslintVersion;
+
+    try {
+      tslintAutoFix = options.tslintAutoFix || false;
+      tslintVersion = tslint
+        ? // tslint:disable-next-line:no-implicit-dependencies
+          require('tslint').Linter.VERSION
+        : undefined;
+    } catch (_ignored) {
+      throw new Error(
+        'When you use `tslint` option, make sure to install `tslint`.'
+      );
+    }
+
+    if (tslintVersion && semver.lt(tslintVersion, '4.0.0')) {
+      throw new Error(
+        `Cannot use current tslint version of ${tslintVersion}, the minimum required version is 4.0.0`
+      );
+    }
+
+    return { tslint, tslintAutoFix, tslintVersion };
+  }
+
+  private validateEslint(options: Partial<ForkTsCheckerWebpackPlugin.Options>) {
+    let eslintVersion: string;
+    const eslintOptions =
+      typeof options.eslintOptions === 'object' ? options.eslintOptions : {};
+
+    try {
+      eslintVersion = require('eslint').Linter.version;
+    } catch (_ignored) {
+      throw new Error(
+        'When you use `eslint` option, make sure to install `eslint`.'
+      );
+    }
+
+    return { eslintVersion, eslintOptions };
+  }
+
+  private static prepareVueOptions(
+    vueOptions?: boolean | Partial<VueOptions>
+  ): VueOptions {
+    const defaultVueOptions: VueOptions = {
+      compiler: 'vue-template-compiler',
+      enabled: false
+    };
+
+    if (typeof vueOptions === 'boolean') {
+      return Object.assign(defaultVueOptions, { enabled: vueOptions });
+    } else if (typeof vueOptions === 'object' && vueOptions !== null) {
+      return Object.assign(defaultVueOptions, vueOptions);
+    } else {
+      return defaultVueOptions;
     }
   }
 
@@ -280,11 +350,11 @@ class ForkTsCheckerWebpackPlugin {
       typeof this.tslint === 'string'
         ? this.computeContextPath(this.tslint as string)
         : undefined;
-    this.watchPaths = this.watch.map(this.computeContextPath);
+    this.watchPaths = this.watch.map(this.computeContextPath.bind(this));
 
     // validate config
-    const tsconfigOk = FsHelper.existsSync(this.tsconfigPath);
-    const tslintOk = !this.tslintPath || FsHelper.existsSync(this.tslintPath);
+    const tsconfigOk = fileExistsSync(this.tsconfigPath);
+    const tslintOk = !this.tslintPath || fileExistsSync(this.tslintPath);
 
     if (this.useTypescriptIncrementalApi && this.workersNumber !== 1) {
       throw new Error(
@@ -338,10 +408,11 @@ class ForkTsCheckerWebpackPlugin {
     }
   }
 
-  private computeContextPath = (filePath: string) =>
-    path.isAbsolute(filePath)
+  private computeContextPath(filePath: string) {
+    return path.isAbsolute(filePath)
       ? filePath
       : path.resolve(this.compiler.options.context, filePath);
+  }
 
   private pluginStart() {
     const run = (_compiler: webpack.Compiler, callback: () => void) => {
@@ -542,7 +613,7 @@ class ForkTsCheckerWebpackPlugin {
             this.doneCallback();
           } else {
             if (this.compiler) {
-              forkTsCheckerHooks.waiting.call(this.tslint !== false);
+              forkTsCheckerHooks.waiting.call(this.tslint !== undefined);
             }
             if (!this.silent && this.logger) {
               this.logger.info(
@@ -569,7 +640,7 @@ class ForkTsCheckerWebpackPlugin {
           if (this.compiler) {
             this.compiler.applyPlugins(
               legacyHookMap.waiting,
-              this.tslint !== false
+              this.tslint !== undefined
             );
           }
           if (!this.silent && this.logger) {
@@ -595,12 +666,14 @@ class ForkTsCheckerWebpackPlugin {
       TSLINT: this.tslintPath || (this.tslint ? 'true' : ''),
       CONTEXT: this.compiler.options.context,
       TSLINTAUTOFIX: String(this.tslintAutoFix),
+      ESLINT: String(this.eslint),
+      ESLINT_OPTIONS: JSON.stringify(this.eslintOptions),
       WATCH: this.isWatching ? this.watchPaths.join('|') : '',
       WORK_DIVISION: String(Math.max(1, this.workersNumber)),
       MEMORY_LIMIT: String(this.memoryLimit),
       CHECK_SYNTACTIC_ERRORS: String(this.checkSyntacticErrors),
       USE_INCREMENTAL_API: String(this.useTypescriptIncrementalApi === true),
-      VUE: String(this.vue)
+      VUE: JSON.stringify(this.vue)
     };
 
     if (typeof this.resolveModuleNameModule !== 'undefined') {
@@ -927,8 +1000,10 @@ class ForkTsCheckerWebpackPlugin {
         this.logger.info(
           'Version: typescript ' +
             this.colors.bold(this.typescriptVersion) +
-            (this.tslint
-              ? ', tslint ' + this.colors.bold(this.tslintVersion)
+            (this.eslint
+              ? ', eslint ' + this.colors.bold(this.eslintVersion as string)
+              : this.tslint
+              ? ', tslint ' + this.colors.bold(this.tslintVersion as string)
               : '')
         );
         this.logger.info(

@@ -3,7 +3,7 @@ import codeFrame = require('babel-code-frame');
 import chalk from 'chalk';
 import * as fs from 'fs';
 import { NormalizedMessage } from '../NormalizedMessage';
-import { FsHelper } from '../FsHelper';
+import { fileExistsSync } from '../FsHelper';
 
 /**
  * Create new code frame formatter.
@@ -24,7 +24,11 @@ export function createCodeframeFormatter(options: any) {
 
     if (message.code === NormalizedMessage.ERROR_CODE_INTERNAL) {
       return (
-        messageColor(`INTERNAL ${message.severity.toUpperCase()}: `) +
+        messageColor(
+          `INTERNAL ${message.severity.toUpperCase()}(${message.line},${
+            message.character
+          }) `
+        ) +
         message.content +
         (message.stack
           ? os.EOL + 'stack trace:' + os.EOL + colors.gray(message.stack)
@@ -34,7 +38,7 @@ export function createCodeframeFormatter(options: any) {
 
     const file = message.file;
     const source =
-      file && FsHelper.existsSync(file) && fs.readFileSync(file, 'utf-8');
+      file && fileExistsSync(file) && fs.readFileSync(file, 'utf-8');
     let frame = '';
 
     if (source) {
@@ -53,7 +57,11 @@ export function createCodeframeFormatter(options: any) {
     }
 
     return (
-      messageColor(message.severity.toUpperCase() + ' in ' + message.file) +
+      messageColor(
+        message.severity.toUpperCase() +
+          ' in ' +
+          `${message.file}(${message.line},${message.character}):`
+      ) +
       os.EOL +
       positionColor(message.line + ':' + message.character) +
       ' ' +
